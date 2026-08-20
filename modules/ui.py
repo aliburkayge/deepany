@@ -981,7 +981,6 @@ class MainWindow(QMainWindow):
                             "Also transfer the source image's hair, which the swap model "
                             "cannot do on its own. 2D approximation — looks best near-frontal "
                             "and degrades as the head turns")
-
         # Map faces is special — closes mapper when toggled off.
         self.sw_map_faces = _Switch(_("Map faces"), modules.globals.map_faces,
                                     _("Manually assign which source face maps to which target face"))
