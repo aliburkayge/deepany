@@ -100,6 +100,13 @@ PREVIEW_MAX_WIDTH = 1200
 PREVIEW_DEFAULT_WIDTH = 640
 PREVIEW_DEFAULT_HEIGHT = 360
 
+# Requested webcam capture resolution. Kept separate from PREVIEW_DEFAULT_*
+# (which only sizes the preview window) so the live-preview quality isn't
+# capped at a low resolution just because the window opens small. VideoCapturer
+# falls back gracefully if the camera can't do this resolution.
+CAMERA_CAPTURE_WIDTH = 1280
+CAMERA_CAPTURE_HEIGHT = 720
+
 POPUP_WIDTH = 750
 POPUP_HEIGHT = 810
 POPUP_SCROLL_WIDTH = 720
@@ -1767,7 +1774,7 @@ class WebcamPreviewWindow(QWidget):
         layout.addWidget(self._image_label, 1)
 
         self._cap = VideoCapturer(camera_index)
-        if not self._cap.start(PREVIEW_DEFAULT_WIDTH, PREVIEW_DEFAULT_HEIGHT, 60):
+        if not self._cap.start(CAMERA_CAPTURE_WIDTH, CAMERA_CAPTURE_HEIGHT, 60):
             update_status("Failed to start camera")
             QTimer.singleShot(0, self.close)
             return
