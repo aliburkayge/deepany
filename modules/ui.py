@@ -25,19 +25,23 @@ import numpy as np
 import requests
 from PIL import Image, ImageOps
 from PySide6.QtCore import (
+    QEasingCurve,
     QObject,
+    QPropertyAnimation,
     QThread,
     QTimer,
+    QVariantAnimation,
     Qt,
     Signal,
 )
-from PySide6.QtGui import QImage, QPixmap
+from PySide6.QtGui import QColor, QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
+    QFrame,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -67,7 +71,7 @@ from modules.face_analyser import (
 )
 from modules.gettext import LanguageManager
 from modules.gpu_processing import gpu_cvt_color, gpu_flip, gpu_resize
-from modules.processors.frame import hair_transfer
+from modules.processors.frame import eye_detail, hair_transfer
 from modules.processors.frame.core import get_frame_processors_modules
 from modules.utilities import (
     has_image_extension,
@@ -85,8 +89,11 @@ import json
 
 # ─── constants ────────────────────────────────────────────────────────────
 
-ROOT_HEIGHT = 820
-ROOT_WIDTH = 640
+# Raised from 820/640: the extra option switches plus the roomier glass
+# padding no longer fit the old frame.  Width is set from the widest card's
+# minimum (measured ~801px) plus the scrollbar gutter; height scrolls.
+ROOT_HEIGHT = 900
+ROOT_WIDTH = 830
 
 PREVIEW_MAX_HEIGHT = 700
 PREVIEW_MAX_WIDTH = 1200
@@ -107,110 +114,193 @@ MAPPER_PREVIEW_SIZE = 100
 SOURCE_TARGET_PREVIEW_SIZE = 200
 
 
-# ─── modern dark stylesheet ───────────────────────────────────────────────
+# ─── stylesheet ───────────────────────────────────────────────────────────
+
+# Instrument panel, not a web page. The reference points are an aircraft-grade
+# control surface and a vehicle cluster: a near-black ground, surfaces that
+# separate by a single hairline rather than by a border or a glow, uppercase
+# micro-labels with wide tracking, and every number set in tabular figures so
+# readouts never jitter as they count. One accent — platinum white — spent
+# sparingly, so the eye lands on state, not on decoration.
 
 QSS = """
-QMainWindow, QDialog { background-color: #1e1e1e; color: #e6e6e6; }
-QWidget { color: #e6e6e6; font-family: "Segoe UI", "SF Pro Display", "Helvetica Neue", Arial, sans-serif; font-size: 11pt; }
+QMainWindow, QDialog { background: #08080a; color: #f2f3f5; }
+QWidget {
+    color: #f2f3f5;
+    font-family: "Segoe UI Variable Text", "Segoe UI", "SF Pro Text", sans-serif;
+    font-size: 10.5pt;
+}
 
+/* Panels are surfaces, not cards: no gradient, no glow, one hairline. */
 QGroupBox {
-    background-color: #262626;
-    border: 1px solid #333333;
-    border-radius: 10px;
-    margin-top: 14px;
-    padding-top: 18px;
-    font-weight: 600;
+    background: #0f0f11;
+    border: 1px solid #1c1c20;
+    border-radius: 4px;
+    margin-top: 26px;
+    padding: 20px 20px 18px 20px;
 }
 QGroupBox::title {
     subcontrol-origin: margin;
     subcontrol-position: top left;
-    padding: 0 8px;
-    color: #9ec5ff;
+    left: 2px;
+    padding: 0;
+    color: #6b6f78;
+    font-family: "Segoe UI Variable Small", "Segoe UI", sans-serif;
+    font-size: 8pt;
+    font-weight: 600;
+    letter-spacing: 2.4px;
+    text-transform: uppercase;
 }
 
+/* Primary action reads as the only lit control in the panel. */
 QPushButton {
-    background-color: #2d6cdf;
-    color: white;
-    border: none;
-    border-radius: 8px;
-    padding: 8px 16px;
-    font-weight: 600;
+    background: #f2f3f5;
+    color: #08080a;
+    border: 1px solid #f2f3f5;
+    border-radius: 3px;
+    padding: 10px 22px;
+    font-size: 9.5pt;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
 }
-QPushButton:hover  { background-color: #3a7af0; }
-QPushButton:pressed{ background-color: #1d57c2; }
-QPushButton:disabled { background-color: #444; color: #888; }
+QPushButton:hover   { background: #ffffff; border-color: #ffffff; }
+QPushButton:pressed { background: #c8cbd2; border-color: #c8cbd2; }
+QPushButton:disabled {
+    background: transparent;
+    color: #3d4048;
+    border: 1px solid #1c1c20;
+}
 QPushButton#secondary {
-    background-color: #3a3a3a;
+    background: transparent;
+    color: #b4b8c0;
+    border: 1px solid #2a2a30;
 }
-QPushButton#secondary:hover { background-color: #4a4a4a; }
-QPushButton#danger { background-color: #c2412d; }
-QPushButton#danger:hover  { background-color: #d8523c; }
+QPushButton#secondary:hover { color: #f2f3f5; border-color: #4a4d56; }
+QPushButton#danger {
+    background: transparent;
+    color: #e5563a;
+    border: 1px solid #4a2018;
+}
+QPushButton#danger:hover { background: #e5563a; color: #08080a; border-color: #e5563a; }
 
 QComboBox {
-    background-color: #2a2a2a;
-    border: 1px solid #404040;
-    border-radius: 6px;
-    padding: 6px 10px;
-    min-height: 24px;
-}
-QComboBox:hover { border-color: #2d6cdf; }
-QComboBox QAbstractItemView {
-    background-color: #2a2a2a;
-    selection-background-color: #2d6cdf;
-    border: 1px solid #404040;
-}
-
-QCheckBox {
-    spacing: 8px;
-    padding: 4px 0;
-}
-QCheckBox::indicator {
-    width: 36px; height: 18px;
-    border-radius: 9px;
-    background-color: #3a3a3a;
-}
-QCheckBox::indicator:checked {
-    background-color: #2d6cdf;
-}
-
-QSlider::groove:horizontal {
-    height: 6px;
-    background: #3a3a3a;
+    background: #131316;
+    border: 1px solid #26262c;
     border-radius: 3px;
+    padding: 9px 12px;
+    min-height: 22px;
+    color: #e4e6ea;
+}
+QComboBox:hover { border-color: #3f424b; }
+QComboBox::drop-down { border: none; width: 26px; }
+QComboBox QAbstractItemView {
+    background: #131316;
+    color: #e4e6ea;
+    selection-background-color: #26262c;
+    border: 1px solid #26262c;
+    outline: none;
+    padding: 3px;
+}
+
+QCheckBox { spacing: 12px; padding: 3px 0; color: #b4b8c0; }
+QCheckBox:hover { color: #f2f3f5; }
+QCheckBox::indicator {
+    width: 34px; height: 18px;
+    border-radius: 2px;
+    background: #17171b;
+    border: 1px solid #2a2a30;
+}
+QCheckBox::indicator:hover { border-color: #4a4d56; }
+QCheckBox::indicator:checked { background: #f2f3f5; border-color: #f2f3f5; }
+
+/* Thin travel, square handle — a fader on a console, not a toy. */
+QSlider::groove:horizontal {
+    height: 2px;
+    background: #26262c;
 }
 QSlider::handle:horizontal {
-    background: #ffffff;
-    width: 16px; height: 16px;
-    margin: -5px 0;
-    border-radius: 8px;
-    border: 1px solid #cccccc;
+    background: #f2f3f5;
+    width: 4px; height: 18px;
+    margin: -8px 0;
+    border-radius: 1px;
 }
-QSlider::sub-page:horizontal {
-    background: #2d6cdf;
-    border-radius: 3px;
-}
+QSlider::handle:horizontal:hover { background: #ffffff; width: 6px; margin: -8px -1px; }
+QSlider::sub-page:horizontal { background: #f2f3f5; }
 
 QLabel#imageDrop {
-    background-color: #2a2a2a;
-    border: 2px dashed #444;
-    border-radius: 8px;
+    background: #0c0c0e;
+    border: 1px solid #1c1c20;
+    border-radius: 3px;
+    color: #4a4d56;
+    font-size: 8.5pt;
+    letter-spacing: 1.6px;
+    text-transform: uppercase;
 }
 QLabel#statusLabel {
-    color: #b9b9b9;
-    font-size: 10pt;
+    color: #5c6068;
+    font-family: "Cascadia Mono", "Consolas", monospace;
+    font-size: 8.5pt;
+}
+QLabel#linkLabel { color: #b4b8c0; }
+
+/* Wordmark: tight tracking, optical weight — the one piece of real display type. */
+QLabel#brandLabel {
+    font-family: "Segoe UI Variable Display", "Segoe UI", sans-serif;
+    font-size: 22pt;
+    font-weight: 700;
     font-style: italic;
+    letter-spacing: -0.5px;
+    color: #f2f3f5;
+    padding: 0;
 }
-QLabel#linkLabel {
-    color: #6ea8ff;
-    text-decoration: underline;
+QLabel#brandSub {
+    font-family: "Cascadia Mono", "Consolas", monospace;
+    font-size: 7.5pt;
+    font-weight: 400;
+    letter-spacing: 3.4px;
+    text-transform: uppercase;
+    color: #4a4d56;
 }
 
+/* Field labels sit quiet; the value beside them is what you read. */
+QLabel#fieldLabel {
+    color: #8b8f98;
+    font-size: 9pt;
+    letter-spacing: 0.8px;
+}
+/* Tabular figures: the column will not shuffle as digits change. */
+QLabel#valueLabel {
+    color: #f2f3f5;
+    font-family: "Cascadia Mono", "Consolas", monospace;
+    font-size: 9pt;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+QLabel#valueLabel[muted="true"] { color: #4a4d56; }
+
+QFrame#rule { background: #1c1c20; border: none; max-height: 1px; min-height: 1px; }
+
+/* The scroll viewport and its content widget are separate widgets from the
+   window, and would otherwise paint their own default (light) background. */
 QScrollArea { border: none; background: transparent; }
+QScrollArea > QWidget > QWidget { background: transparent; }
+QWidget#scrollContent { background: transparent; }
+QScrollBar:vertical { background: transparent; width: 3px; margin: 0; }
+QScrollBar::handle:vertical { background: #2a2a30; border-radius: 1px; min-height: 40px; }
+QScrollBar::handle:vertical:hover { background: #4a4d56; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: none; }
 
-QFrame#card {
-    background-color: #262626;
-    border-radius: 10px;
+QToolTip {
+    background: #131316;
+    color: #b4b8c0;
+    border: 1px solid #26262c;
+    padding: 7px 10px;
+    font-size: 9pt;
 }
+
+QFrame#card { background: #0f0f11; border: 1px solid #1c1c20; border-radius: 4px; }
 """
 
 
@@ -319,6 +409,7 @@ def save_switch_states():
         "show_ai_badge": modules.globals.show_ai_badge,
         "hair_transfer": modules.globals.hair_transfer,
         "hair_transfer_strength": modules.globals.hair_transfer_strength,
+        "eye_color_lock": modules.globals.eye_color_lock,
     }
     try:
         with open("switch_states.json", "w") as f:
@@ -347,6 +438,11 @@ def load_switch_states():
         modules.globals.show_ai_badge = state.get("show_ai_badge", False)
         modules.globals.hair_transfer = state.get("hair_transfer", False)
         modules.globals.hair_transfer_strength = state.get("hair_transfer_strength", 100.0)
+        modules.globals.eye_color_lock = state.get("eye_color_lock", 0.0)
+        # Eye detail, like mouth mask, always starts off so a saved
+        # session never silently re-enables a face-altering overlay.
+        modules.globals.eyes_mask_size = 0.0
+        modules.globals.eyes_mask = False
         # Mouth mask always starts disabled (slider at 0) on launch,
         # regardless of the persisted value — enable it explicitly each session.
         modules.globals.mouth_mask_size = 0.0
@@ -446,6 +542,253 @@ def _make_image_drop(text: str, size: Tuple[int, int]) -> QLabel:
     return label
 
 
+class SplashScreen(QWidget):
+    """Cold-open title card: a hairline splits from centre, the wordmark
+    resolves out of it, then the whole thing steps aside.
+
+    Everything is drawn by hand rather than assembled from widgets — the
+    wordmark's letter-spacing has to animate, and Qt only exposes that through
+    QFont, not through QSS.
+    """
+
+    finished = Signal()
+
+    # Beat structure, in ms from t=0.
+    _RULE_MS = 620      # hairline draws out from the centre
+    _MARK_MS = 900      # wordmark fades up and tightens
+    _HOLD_MS = 640      # let it sit
+    _EXIT_MS = 420      # fade away
+
+    def __init__(self, text: str, subtitle: str = ""):
+        super().__init__(None)
+        self._text = text
+        self._subtitle = subtitle
+        self._t = 0.0            # 0..1 across the whole sequence
+        self._exit = 0.0         # 0..1 exit fade
+
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.SplashScreen
+            | Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setFixedSize(720, 400)
+
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            geo = screen.geometry()
+            self.move(geo.center().x() - 360, geo.center().y() - 200)
+
+        total = self._RULE_MS + self._MARK_MS + self._HOLD_MS
+        self._intro = QVariantAnimation(self)
+        self._intro.setDuration(total)
+        self._intro.setStartValue(0.0)
+        self._intro.setEndValue(1.0)
+        self._intro.setEasingCurve(QEasingCurve.Type.Linear)
+        self._intro.valueChanged.connect(self._on_tick)
+        self._intro.finished.connect(self._start_exit)
+
+        self._outro = QVariantAnimation(self)
+        self._outro.setDuration(self._EXIT_MS)
+        self._outro.setStartValue(0.0)
+        self._outro.setEndValue(1.0)
+        self._outro.setEasingCurve(QEasingCurve.Type.InCubic)
+        self._outro.valueChanged.connect(self._on_exit_tick)
+        self._outro.finished.connect(self._done)
+
+    # ── lifecycle ────────────────────────────────────────────────────────
+
+    def run(self) -> None:
+        self.show()
+        self.raise_()
+        self._intro.start()
+
+    def _on_tick(self, value) -> None:
+        self._t = float(value)
+        self.update()
+
+    def _start_exit(self) -> None:
+        self._outro.start()
+
+    def _on_exit_tick(self, value) -> None:
+        self._exit = float(value)
+        self.update()
+
+    def _done(self) -> None:
+        self.close()
+        self.finished.emit()
+
+    def mousePressEvent(self, _event) -> None:
+        # Never make someone sit through a splash twice.
+        self._intro.stop()
+        self._outro.stop()
+        self._done()
+
+    # ── painting ─────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _ease_out(x: float) -> float:
+        x = max(0.0, min(1.0, x))
+        return 1.0 - pow(1.0 - x, 3)
+
+    def _phase(self) -> Tuple[float, float]:
+        """(rule progress, wordmark progress), each eased 0..1."""
+        total = self._RULE_MS + self._MARK_MS + self._HOLD_MS
+        now = self._t * total
+        rule = self._ease_out(now / self._RULE_MS)
+        mark = self._ease_out((now - self._RULE_MS * 0.55) / self._MARK_MS)
+        return rule, mark
+
+    def paintEvent(self, _event) -> None:
+        from PySide6.QtGui import QFont, QPainter, QPen
+
+        rule_p, mark_p = self._phase()
+        alpha = 1.0 - self._exit
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+
+        w, h = self.width(), self.height()
+        painter.fillRect(self.rect(), QColor("#08080a"))
+
+        cx, cy = w / 2, h / 2
+
+        # 1. Hairline splitting outward from dead centre.
+        rule_half = rule_p * (w * 0.34)
+        if rule_half > 0.5:
+            pen = QPen(QColor(242, 243, 245, int(255 * min(1.0, rule_p) * alpha)))
+            pen.setWidthF(1.0)
+            painter.setPen(pen)
+            painter.drawLine(int(cx - rule_half), int(cy + 34),
+                             int(cx + rule_half), int(cy + 34))
+
+        if mark_p <= 0.0:
+            painter.end()
+            return
+
+        # 2. Wordmark resolving: tracking closes in as opacity comes up, so it
+        #    reads as the letters gathering rather than a plain cross-fade.
+        font = QFont("Segoe UI Variable Display", 40)
+        font.setItalic(True)
+        font.setWeight(QFont.Weight.Bold)
+        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing,
+                              18.0 * (1.0 - mark_p))
+        painter.setFont(font)
+        painter.setPen(QColor(242, 243, 245, int(255 * mark_p * alpha)))
+
+        metrics = painter.fontMetrics()
+        tw = metrics.horizontalAdvance(self._text)
+        painter.drawText(int(cx - tw / 2),
+                         int(cy + metrics.capHeight() / 2 - 6),
+                         self._text)
+
+        # 3. Subtitle trails the wordmark by a beat.
+        if self._subtitle and mark_p > 0.45:
+            sub_p = self._ease_out((mark_p - 0.45) / 0.55)
+            sub = QFont("Cascadia Mono", 8)
+            sub.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 5.0)
+            painter.setFont(sub)
+            painter.setPen(QColor(90, 95, 104, int(255 * sub_p * alpha)))
+            sm = painter.fontMetrics()
+            sw = sm.horizontalAdvance(self._subtitle)
+            painter.drawText(int(cx - sw / 2), int(cy + 62), self._subtitle)
+
+        painter.end()
+
+
+class _SmoothScrollArea(QScrollArea):
+    """Scroll area that eases to its target instead of stepping to it.
+
+    Wheel deltas accumulate into a single running animation, so spinning the
+    wheel keeps extending one glide rather than restarting it each notch.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._anim = QPropertyAnimation(self.verticalScrollBar(), b"value", self)
+        self._anim.setDuration(380)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+    def wheelEvent(self, event) -> None:
+        bar = self.verticalScrollBar()
+        if bar.maximum() == 0:
+            event.ignore()
+            return
+
+        # Extend the in-flight glide when one is running, so fast scrolling
+        # accelerates rather than stuttering back to the current position.
+        running = self._anim.state() == QPropertyAnimation.State.Running
+        base = self._anim.endValue() if running else bar.value()
+        target = int(base) - int(event.angleDelta().y() * 0.9)
+        target = max(bar.minimum(), min(bar.maximum(), target))
+
+        self._anim.stop()
+        self._anim.setStartValue(bar.value())
+        self._anim.setEndValue(target)
+        self._anim.start()
+        event.accept()
+
+
+def _rule() -> QFrame:
+    """A 1px separator — the only divider this design uses."""
+    line = QFrame()
+    line.setObjectName("rule")
+    line.setFrameShape(QFrame.Shape.NoFrame)
+    line.setFixedHeight(1)
+    return line
+
+
+class _AnimatedSlider(QSlider):
+    """Slider whose handle eases to clicked positions instead of jumping.
+
+    Dragging stays 1:1 — animating under the cursor would feel like lag.  Only
+    track clicks and wheel/key steps are animated.
+    """
+
+    def __init__(self, orientation=Qt.Orientation.Horizontal, parent=None):
+        super().__init__(orientation, parent)
+        self._anim = QPropertyAnimation(self, b"value", self)
+        self._anim.setDuration(260)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._dragging = False
+
+    def _animate_to(self, target: int) -> None:
+        target = max(self.minimum(), min(self.maximum(), target))
+        self._anim.stop()
+        self._anim.setStartValue(self.value())
+        self._anim.setEndValue(target)
+        self._anim.start()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            span = self.width() - 12
+            if span > 0:
+                ratio = (event.position().x() - 6) / span
+                ratio = max(0.0, min(1.0, ratio))
+                target = self.minimum() + round(
+                    ratio * (self.maximum() - self.minimum())
+                )
+                # Near the handle this is a grab, not a jump — hand it to Qt so
+                # the drag starts without the animation fighting the cursor.
+                if abs(target - self.value()) > (self.maximum() - self.minimum()) * 0.02:
+                    self._animate_to(target)
+                    event.accept()
+                    return
+        self._dragging = True
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._dragging = False
+        super().mouseReleaseEvent(event)
+
+    def wheelEvent(self, event) -> None:
+        step = max(1, (self.maximum() - self.minimum()) // 20)
+        delta = step if event.angleDelta().y() > 0 else -step
+        self._animate_to(self.value() + delta)
+        event.accept()
+
+
 class _Switch(QWidget):
     """Compact toggle switch with label + optional tooltip."""
 
@@ -480,14 +823,37 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(
             f"{modules.metadata.name} {modules.metadata.version} {modules.metadata.edition}"
         )
-        self.setMinimumSize(ROOT_WIDTH, ROOT_HEIGHT)
+        # Content is taller than the window on purpose — it scrolls.  The
+        # minimum only has to stay usable on a short screen.
+        self.setMinimumSize(ROOT_WIDTH, 520)
         self.resize(ROOT_WIDTH, ROOT_HEIGHT)
 
+        scroll = _SmoothScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setCentralWidget(scroll)
+
         root = QWidget()
-        self.setCentralWidget(root)
+        root.setObjectName("scrollContent")
+        scroll.setWidget(root)
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setContentsMargins(18, 14, 18, 16)
         layout.setSpacing(12)
+
+        # Wordmark block, centred, with a hairline closing it off.
+        brand = QLabel(modules.metadata.name)
+        brand.setObjectName("brandLabel")
+        brand.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(brand)
+
+        brand_sub = QLabel(modules.metadata.edition)
+        brand_sub.setObjectName("brandSub")
+        brand_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(brand_sub)
+
+        layout.addSpacing(4)
+        layout.addWidget(_rule())
+        layout.addSpacing(4)
 
         # Source/Target row
         layout.addLayout(self._build_image_row())
@@ -510,11 +876,11 @@ class MainWindow(QMainWindow):
         self._status_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._status_label)
 
-        footer = QLabel("Deep Live Cam")
-        footer.setObjectName("linkLabel")
+        footer = QLabel(
+            f"{modules.metadata.name} {modules.metadata.edition}"
+        )
+        footer.setObjectName("statusLabel")
         footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        footer.setCursor(Qt.CursorShape.PointingHandCursor)
-        footer.mousePressEvent = lambda _e: webbrowser.open("https://deeplivecam.net")
         layout.addWidget(footer)
 
     # ── image row ────────────────────────────────────────────────────────
@@ -574,10 +940,12 @@ class MainWindow(QMainWindow):
     # ── options card ─────────────────────────────────────────────────────
 
     def _build_options_card(self) -> QGroupBox:
-        card = QGroupBox(_("Options"))
+        card = QGroupBox(_("Options").upper())
         grid = QGridLayout(card)
         grid.setHorizontalSpacing(20)
-        grid.setVerticalSpacing(6)
+        # The switch pills are 20px tall inside a padded QCheckBox; 6px of row
+        # spacing let neighbouring rows clip each other once the list grew.
+        grid.setVerticalSpacing(12)
 
         def make(field, label, tip):
             sw = _Switch(_(label), getattr(modules.globals, field), _(tip))
@@ -634,7 +1002,8 @@ class MainWindow(QMainWindow):
         # Face enhancer dropdown — round up so an odd switch count leaves the
         # last (half-empty) switch row intact instead of overlapping it.
         enhancer_row = (len(items) + 1) // 2
-        enhancer_label = QLabel(_("Face Enhancer:"))
+        enhancer_label = QLabel(_("Face Enhancer"))
+        enhancer_label.setObjectName("fieldLabel")
         grid.addWidget(enhancer_label, enhancer_row, 0)
 
         self.cb_enhancer = QComboBox()
@@ -656,51 +1025,87 @@ class MainWindow(QMainWindow):
     # ── sliders card ─────────────────────────────────────────────────────
 
     def _build_sliders_card(self) -> QGroupBox:
-        card = QGroupBox(_("Refinement"))
+        card = QGroupBox(_("Refinement").upper())
         grid = QGridLayout(card)
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(10)
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(16)
+        grid.setColumnStretch(1, 1)
 
-        def slider(min_v, max_v, default, denom, on_change):
-            s = QSlider(Qt.Orientation.Horizontal)
+        def row(index, label, min_v, max_v, default, denom, on_change,
+                fmt, tooltip):
+            """Label | fader | live readout, on one baseline."""
+            name = QLabel(_(label))
+            name.setObjectName("fieldLabel")
+            name.setMinimumWidth(104)
+            grid.addWidget(name, index, 0)
+
+            s = _AnimatedSlider(Qt.Orientation.Horizontal)
             s.setRange(int(min_v * denom), int(max_v * denom))
             s.setValue(int(default * denom))
-            s.valueChanged.connect(lambda iv: on_change(iv / denom))
+            s.setToolTip(_(tooltip))
+            grid.addWidget(s, index, 1)
+
+            readout = QLabel()
+            readout.setObjectName("valueLabel")
+            readout.setMinimumWidth(56)
+            readout.setAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+            )
+            grid.addWidget(readout, index, 2)
+
+            def _sync(raw: int) -> None:
+                value = raw / denom
+                readout.setText(fmt(value))
+                # Dim a readout that is doing nothing, so the lit numbers are
+                # the ones actually affecting the output.
+                readout.setProperty("muted", value <= 0)
+                readout.style().unpolish(readout)
+                readout.style().polish(readout)
+                on_change(value)
+
+            s.valueChanged.connect(_sync)
+            _sync(s.value())
             return s
 
-        # Transparency
-        grid.addWidget(QLabel(_("Transparency")), 0, 0)
-        self.s_transparency = slider(0.0, 1.0, 1.0, 100, self._on_transparency_change)
-        self.s_transparency.setToolTip(
-            _("Blend between original and swapped face (0% = original, 100% = fully swapped)")
+        pct = lambda v: f"{v * 100:.0f}%"
+
+        self.s_transparency = row(
+            0, "Transparency", 0.0, 1.0, 1.0, 100, self._on_transparency_change,
+            pct,
+            "Blend between original and swapped face (0% = original, 100% = fully swapped)",
         )
-        grid.addWidget(self.s_transparency, 0, 1)
-
-        # Sharpness
-        grid.addWidget(QLabel(_("Sharpness")), 1, 0)
-        self.s_sharpness = slider(0.0, 5.0, 0.0, 10, self._on_sharpness_change)
-        self.s_sharpness.setToolTip(_("Sharpen the enhanced face output"))
-        grid.addWidget(self.s_sharpness, 1, 1)
-
-        # Mouth mask — always starts at 0 (disabled) on launch
-        grid.addWidget(QLabel(_("Mouth Mask")), 2, 0)
-        self.s_mouth = slider(0.0, 100.0, 0.0, 1,
-                              self._on_mouth_mask_change)
+        self.s_sharpness = row(
+            1, "Sharpness", 0.0, 5.0, 0.0, 10, self._on_sharpness_change,
+            lambda v: f"{v:.1f}",
+            "Sharpen the enhanced face output",
+        )
+        self.s_mouth = row(
+            2, "Mouth Mask", 0.0, 100.0, 0.0, 1, self._on_mouth_mask_change,
+            lambda v: f"{v:.0f}%",
+            "0 = use swapped mouth, 100 = expose original mouth to chin area",
+        )
         self.s_mouth.sliderPressed.connect(self._on_mouth_mask_pressed)
         self.s_mouth.sliderReleased.connect(self._on_mouth_mask_released)
-        self.s_mouth.setToolTip(
-            _("0 = use swapped mouth, 100 = expose original mouth to chin area")
-        )
-        grid.addWidget(self.s_mouth, 2, 1)
 
-        # Hair transfer strength — only meaningful while Hair Transfer is on.
-        grid.addWidget(QLabel(_("Hair Blend")), 3, 0)
-        self.s_hair = slider(0.0, 100.0, modules.globals.hair_transfer_strength, 1,
-                             self._on_hair_strength_change)
-        self.s_hair.setToolTip(
-            _("Opacity of the transferred hair layer (needs Hair Transfer enabled)")
+        self.s_hair = row(
+            3, "Hair Blend", 0.0, 100.0, modules.globals.hair_transfer_strength, 1,
+            self._on_hair_strength_change,
+            lambda v: f"{v:.0f}%",
+            "Opacity of the transferred hair layer (needs Hair Transfer enabled)",
         )
-        grid.addWidget(self.s_hair, 3, 1)
+        self.s_eyes = row(
+            4, "Eye Detail", 0.0, 100.0, 0.0, 1, self._on_eyes_mask_change,
+            lambda v: f"{v:.0f}%",
+            "Restore the real eyes over the swap — recovers true gaze, eye colour "
+            "and full sharpness that the 128px swap loses",
+        )
+        self.s_eye_color = row(
+            5, "Iris Lock", 0.0, 100.0, modules.globals.eye_color_lock, 1,
+            self._on_eye_color_change,
+            lambda v: f"{v:.0f}%",
+            "Re-tint the restored iris toward the source face's eye colour, "
+            "keeping the source identity's eye colour with live gaze (needs Eye Detail)",
+        )
         return card
 
     # ── action row ───────────────────────────────────────────────────────
@@ -729,7 +1134,7 @@ class MainWindow(QMainWindow):
     # ── camera card ──────────────────────────────────────────────────────
 
     def _build_camera_card(self) -> QGroupBox:
-        card = QGroupBox(_("Camera"))
+        card = QGroupBox(_("Camera").upper())
         layout = QHBoxLayout(card)
 
         layout.addWidget(QLabel(_("Select Camera:")))
@@ -883,6 +1288,13 @@ class MainWindow(QMainWindow):
     def _on_hair_strength_change(self, value: float) -> None:
         modules.globals.hair_transfer_strength = value
         update_status(f"Hair blend set to {value:.0f}%")
+
+    def _on_eyes_mask_change(self, value: float) -> None:
+        modules.globals.eyes_mask_size = value
+        modules.globals.eyes_mask = value > 0
+
+    def _on_eye_color_change(self, value: float) -> None:
+        modules.globals.eye_color_lock = value
 
     def _on_mouth_mask_change(self, value: float) -> None:
         modules.globals.mouth_mask_size = value
@@ -1127,6 +1539,7 @@ class _ProcessingWorker(QThread):
         flow_prev_gray = None
         flow_pts = None
         hair_source_ready = False
+        iris_source_ready = False
         lk_params = dict(
             winSize=(21, 21), maxLevel=3,
             criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
@@ -1150,6 +1563,19 @@ class _ProcessingWorker(QThread):
                     last_source_path = modules.globals.source_path
                     source_image = get_one_face(imread_unicode(modules.globals.source_path))
                     hair_source_ready = False
+                    iris_source_ready = False
+
+                # Sample the source identity's iris colour once per source, so
+                # Iris Lock has something to tint toward.
+                if (
+                    modules.globals.eye_color_lock > 0
+                    and modules.globals.eyes_mask
+                    and not iris_source_ready
+                    and source_image is not None
+                ):
+                    iris_source_ready = eye_detail.prepare_source_iris(
+                        modules.globals.source_path, source_image
+                    )
 
                 # Segment the source's hair once per source image, off the
                 # per-frame path. Retried while disabled→enabled mid-session.
@@ -1233,7 +1659,7 @@ class _ProcessingWorker(QThread):
                 # Fast detection skips the 2d106 landmark model, but the mouth
                 # mask needs it. Attach landmarks on demand (computed once per
                 # detection cycle — the helper no-ops if already present).
-                if modules.globals.mouth_mask and cached_faces:
+                if (modules.globals.mouth_mask or modules.globals.eyes_mask) and cached_faces:
                     ensure_landmarks(temp_frame, cached_faces)
 
                 for fp in frame_processors:
@@ -1670,7 +2096,10 @@ class _Window:
         self._main = main_window
 
     def mainloop(self) -> None:
-        self._main.show()
+        # Title card first; the main window is revealed when it steps aside.
+        splash = SplashScreen(modules.metadata.name, modules.metadata.edition)
+        splash.finished.connect(self._main.show)
+        splash.run()
         self._app.exec()
 
 

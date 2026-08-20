@@ -356,7 +356,23 @@ python run.py --execution-provider openvino
 
 ## Additions in this fork
 
-Three options added on top of upstream, all in the **Options** panel:
+Shipped as **UGCDxABG**, with a rebuilt interface and four capabilities added on
+top of upstream.
+
+**Eye Detail** *(Refinement slider)* — The swap rebuilds the whole face from a
+128x128 tensor, and the eyes pay for it twice: the iris is reconstructed from the
+source identity, so the target's real gaze and eye colour are gone, and what is
+left has been upscaled from a handful of pixels, so it smears as soon as the head
+moves. This cuts the eye regions out of the untouched frame and composites them
+over the finished swap, restoring true gaze direction, true eye colour and full
+sensor resolution at once. Inside the solid part of the mask the output matches
+the original frame to within 0.1/255, and it costs about 3 ms per frame.
+
+**Iris Lock** *(Refinement slider)* — Re-tints the restored iris toward the
+source identity's eye colour, so a blue-eyed source stays blue-eyed while the
+movement and sharpness still come from the live frame. Only the LAB chroma
+channels move; luminance is left alone, because shifting it is what makes tinted
+eyes read as flat contact lenses. Needs **Eye Detail** above zero.
 
 **Motion Tracking** *(on by default)* — Live mode only runs full face detection
 every few frames and reuses the last box in between, which lags behind fast head

@@ -65,6 +65,15 @@ mask_down_size: float = 0.1        # Expansion factor for lower lip mask (relati
 mask_size: float = 1.0             # Expansion factor for upper lip mask (relative)
 mouth_mask_size: float = 0.0       # Mouth mask size (0-100; 0=off, 100=mouth to chin)
 
+# Eye Detail Options
+# The swap reconstructs the iris from the source, losing the target's gaze and
+# eye colour and upscaling the result from a 128x128 tensor. Exposing the real
+# eyes restores gaze, colour and sharpness in one move.
+eyes_mask: bool = False            # Enable exposing the real eyes over the swap
+eyes_mask_size: float = 0.0        # Eye region size (0-100; 0=off)
+eye_color_lock: float = 0.0        # 0-100: re-tint exposed iris toward the
+                                    # source identity's eye colour
+
 # --- START: Added for Frame Interpolation ---
 enable_interpolation: bool = True # Toggle temporal smoothing
 interpolation_weight: float = 0  # Blend weight for current frame (0.0-1.0). Lower=smoother.

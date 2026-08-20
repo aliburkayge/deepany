@@ -18,6 +18,7 @@ from modules.utilities import (
 )
 from modules.cluster_analysis import find_closest_centroid
 from modules.gpu_processing import gpu_gaussian_blur, gpu_sharpen, gpu_add_weighted, gpu_resize
+from modules.processors.frame import eye_detail
 from modules.platform_info import OPENVINO_PROVIDER_CONFIG
 import os
 from collections import deque
@@ -520,12 +521,20 @@ def swap_face(source_face: Face, target_face: Face, temp_frame: Frame) -> Frame:
     opacity = getattr(modules.globals, "opacity", 1.0)
     opacity = max(0.0, min(1.0, opacity))
     mouth_mask_enabled = getattr(modules.globals, "mouth_mask", False)
+    eyes_mask_enabled = getattr(modules.globals, "eyes_mask", False)
     poisson_blend_enabled = getattr(modules.globals, "poisson_blend", False)
     # Poisson blend's seamlessClone needs the genuine pre-swap frame as its
     # destination. Without this, original_frame aliases temp_frame, which
     # _fast_paste_back mutates in place — so seamlessClone would blend the
-    # swapped face onto the already-swapped frame (no visible effect).
-    needs_original = opacity < 1.0 or mouth_mask_enabled or poisson_blend_enabled
+    # swapped face onto the already-swapped frame (no visible effect).  The
+    # eye and mouth cutouts need it for the same reason: they must be cut from
+    # pre-swap pixels, not from the frame the paste-back just overwrote.
+    needs_original = (
+        opacity < 1.0
+        or mouth_mask_enabled
+        or eyes_mask_enabled
+        or poisson_blend_enabled
+    )
     if needs_original:
         original_frame = temp_frame.copy()
     else:
@@ -568,6 +577,18 @@ def swap_face(source_face: Face, target_face: Face, temp_frame: Frame) -> Frame:
 
     # --- Post-swap Processing (Masking, Opacity, etc.) ---
     # Now, work with the guaranteed uint8 'swapped_frame'
+
+    # Eyes go back before the mouth so both read against the same face mask,
+    # and both are cut from original_frame — the pre-swap pixels.
+    if eyes_mask_enabled:
+        eye_face_mask = create_face_mask(target_face, original_frame)
+        eyes_mask, eyes_cutout, eyes_box, eye_polygons = (
+            eye_detail.create_eyes_mask(target_face, original_frame)
+        )
+        if eyes_cutout is not None and eyes_box != (0, 0, 0, 0):
+            swapped_frame = eye_detail.apply_eyes_area(
+                swapped_frame, eyes_cutout, eyes_box, eye_face_mask, eye_polygons
+            )
 
     if mouth_mask_enabled: # Check if mouth_mask is enabled
         # Create a mask for the target face

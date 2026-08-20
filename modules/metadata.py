@@ -1,3 +1,3 @@
-name = 'Deep-Live-Cam'
+name = 'UGCDxABG'
 version = '2.1.5'
-edition = 'GitHub Edition'
+edition = 'Platinum Edition'
