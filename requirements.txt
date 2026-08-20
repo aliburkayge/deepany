@@ -16,3 +16,7 @@ opennsfw2==0.18.0
 keras>=3.0.0
 protobuf>=6.33.5,<8
 pygrabber; sys_platform == 'win32'
+# Hair Transfer (beta) only. Install with --no-deps to keep the opencv-python
+# pin above: mediapipe otherwise pulls opencv-contrib-python over it.
+# Also needs models/hair_segmenter.tflite — see README.
+mediapipe>=1.0.0

@@ -67,6 +67,7 @@ from modules.face_analyser import (
 )
 from modules.gettext import LanguageManager
 from modules.gpu_processing import gpu_cvt_color, gpu_flip, gpu_resize
+from modules.processors.frame import hair_transfer
 from modules.processors.frame.core import get_frame_processors_modules
 from modules.utilities import (
     has_image_extension,
@@ -314,6 +315,10 @@ def save_switch_states():
         "mouth_mask": modules.globals.mouth_mask,
         "show_mouth_mask_box": modules.globals.show_mouth_mask_box,
         "mouth_mask_size": modules.globals.mouth_mask_size,
+        "enable_flow_tracking": modules.globals.enable_flow_tracking,
+        "show_ai_badge": modules.globals.show_ai_badge,
+        "hair_transfer": modules.globals.hair_transfer,
+        "hair_transfer_strength": modules.globals.hair_transfer_strength,
     }
     try:
         with open("switch_states.json", "w") as f:
@@ -338,6 +343,10 @@ def load_switch_states():
         modules.globals.live_resizable = state.get("live_resizable", False)
         modules.globals.fp_ui = state.get("fp_ui", {"face_enhancer": False})
         modules.globals.show_fps = state.get("show_fps", False)
+        modules.globals.enable_flow_tracking = state.get("enable_flow_tracking", True)
+        modules.globals.show_ai_badge = state.get("show_ai_badge", False)
+        modules.globals.hair_transfer = state.get("hair_transfer", False)
+        modules.globals.hair_transfer_strength = state.get("hair_transfer_strength", 100.0)
         # Mouth mask always starts disabled (slider at 0) on launch,
         # regardless of the persisted value — enable it explicitly each session.
         modules.globals.mouth_mask_size = 0.0
@@ -594,6 +603,16 @@ class MainWindow(QMainWindow):
                                  "Fix blue/green color cast from some webcams")
         self.sw_show_fps = make("show_fps", "Show FPS",
                                 "Display frames-per-second counter on the live preview")
+        self.sw_flow_tracking = make("enable_flow_tracking", "Motion Tracking",
+                                "Track the face between detections with optical flow "
+                                "instead of holding a stale position (reduces lag on fast head movement)")
+        self.sw_ai_badge = make("show_ai_badge", "AI Generated Badge",
+                                "Overlay an \"AI GENERATED\" label on the live preview "
+                                "(recommended before streaming/recording for disclosure compliance)")
+        self.sw_hair = make("hair_transfer", "Hair Transfer (beta)",
+                            "Also transfer the source image's hair, which the swap model "
+                            "cannot do on its own. 2D approximation — looks best near-frontal "
+                            "and degrades as the head turns")
 
         # Map faces is special — closes mapper when toggled off.
         self.sw_map_faces = _Switch(_("Map faces"), modules.globals.map_faces,
@@ -606,13 +625,17 @@ class MainWindow(QMainWindow):
             self.sw_keep_frames, self.sw_many_faces,
             self.sw_map_faces, self.sw_show_fps,
             self.sw_poisson, self.sw_color_fix,
+            self.sw_flow_tracking, self.sw_ai_badge,
+            self.sw_hair,
         ]
         for i, w in enumerate(items):
             grid.addWidget(w, i // 2, i % 2)
 
-        # Face enhancer dropdown
+        # Face enhancer dropdown — round up so an odd switch count leaves the
+        # last (half-empty) switch row intact instead of overlapping it.
+        enhancer_row = (len(items) + 1) // 2
         enhancer_label = QLabel(_("Face Enhancer:"))
-        grid.addWidget(enhancer_label, len(items) // 2, 0)
+        grid.addWidget(enhancer_label, enhancer_row, 0)
 
         self.cb_enhancer = QComboBox()
         self.cb_enhancer.addItems(["None", "GFPGAN", "GPEN-512", "GPEN-256"])
@@ -626,7 +649,7 @@ class MainWindow(QMainWindow):
         self.cb_enhancer.setCurrentText(initial)
         self.cb_enhancer.currentTextChanged.connect(self._on_enhancer_change)
         self.cb_enhancer.setToolTip(_("Select a face enhancement model (None = no enhancement)"))
-        grid.addWidget(self.cb_enhancer, len(items) // 2, 1)
+        grid.addWidget(self.cb_enhancer, enhancer_row, 1)
 
         return card
 
@@ -669,6 +692,15 @@ class MainWindow(QMainWindow):
             _("0 = use swapped mouth, 100 = expose original mouth to chin area")
         )
         grid.addWidget(self.s_mouth, 2, 1)
+
+        # Hair transfer strength — only meaningful while Hair Transfer is on.
+        grid.addWidget(QLabel(_("Hair Blend")), 3, 0)
+        self.s_hair = slider(0.0, 100.0, modules.globals.hair_transfer_strength, 1,
+                             self._on_hair_strength_change)
+        self.s_hair.setToolTip(
+            _("Opacity of the transferred hair layer (needs Hair Transfer enabled)")
+        )
+        grid.addWidget(self.s_hair, 3, 1)
         return card
 
     # ── action row ───────────────────────────────────────────────────────
@@ -847,6 +879,10 @@ class MainWindow(QMainWindow):
     def _on_sharpness_change(self, value: float) -> None:
         modules.globals.sharpness = value
         update_status(f"Sharpness set to {value:.1f}")
+
+    def _on_hair_strength_change(self, value: float) -> None:
+        modules.globals.hair_transfer_strength = value
+        update_status(f"Hair blend set to {value:.0f}%")
 
     def _on_mouth_mask_change(self, value: float) -> None:
         modules.globals.mouth_mask_size = value
@@ -1033,6 +1069,34 @@ class _CaptureWorker(QThread):
                     pass
 
 
+def _draw_ai_badge(frame: np.ndarray) -> None:
+    """Overlay a small, legible "AI GENERATED" disclosure label in-place.
+
+    Intended for streamers who want automatic on-screen disclosure that a
+    live face swap is active, matching platform synthetic-media policies
+    (e.g. TikTok requires labeling realistic AI-altered video).
+    """
+    h, w = frame.shape[:2]
+    text = "AI GENERATED"
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = max(0.5, min(1.0, w / 960))
+    thickness = 2
+    (tw, th), baseline = cv2.getTextSize(text, font, scale, thickness)
+
+    pad = 10
+    x0, y0 = 10, h - th - baseline - 2 * pad - 10
+    x1, y1 = x0 + tw + 2 * pad, h - 10
+
+    overlay = frame.copy()
+    cv2.rectangle(overlay, (x0, y0), (x1, y1), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, dst=frame)
+
+    cv2.putText(
+        frame, text, (x0 + pad, y1 - pad - baseline // 2),
+        font, scale, (255, 255, 255), thickness, cv2.LINE_AA,
+    )
+
+
 class _ProcessingWorker(QThread):
     """Pulls raw frames, runs detect/swap/enhance, pushes processed frames."""
 
@@ -1056,6 +1120,18 @@ class _ProcessingWorker(QThread):
         cached_many_faces = None
         det_interval = max(1, round(self._fps * 0.08))
 
+        # Optical-flow tracking state (single-face mode only). Between full
+        # re-detections we nudge the cached bbox/kps toward where the face
+        # actually moved instead of holding it frozen for det_interval
+        # frames — cuts perceived swap lag on fast head motion.
+        flow_prev_gray = None
+        flow_pts = None
+        hair_source_ready = False
+        lk_params = dict(
+            winSize=(21, 21), maxLevel=3,
+            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
+        )
+
         while not self._stop.is_set():
             try:
                 frame = self._cq.get(timeout=0.05)
@@ -1073,15 +1149,80 @@ class _ProcessingWorker(QThread):
                 ):
                     last_source_path = modules.globals.source_path
                     source_image = get_one_face(imread_unicode(modules.globals.source_path))
+                    hair_source_ready = False
+
+                # Segment the source's hair once per source image, off the
+                # per-frame path. Retried while disabled→enabled mid-session.
+                if modules.globals.hair_transfer and not hair_source_ready and source_image is not None:
+                    hair_source_ready = hair_transfer.prepare_source(
+                        modules.globals.source_path, source_image
+                    )
+                    if not hair_source_ready:
+                        update_status(
+                            "Hair transfer: no usable hair found in the source image."
+                        )
 
                 det_count += 1
-                if det_count % det_interval == 0:
+                is_redetect_frame = det_count % det_interval == 0
+                use_flow = (
+                    modules.globals.enable_flow_tracking
+                    and not modules.globals.many_faces
+                )
+                flow_gray = None
+                if use_flow:
+                    flow_gray = gpu_cvt_color(temp_frame, cv2.COLOR_BGR2GRAY)
+
+                if is_redetect_frame:
                     if modules.globals.many_faces:
                         cached_target_face = None
                         cached_many_faces = detect_many_faces_fast(temp_frame)
                     else:
                         cached_target_face = detect_one_face_fast(temp_frame)
                         cached_many_faces = None
+                    # Fresh detection — reset tracking to the true kps.
+                    if use_flow and cached_target_face is not None and cached_target_face.kps is not None:
+                        flow_pts = cached_target_face.kps.reshape(-1, 1, 2).astype(np.float32)
+                        flow_prev_gray = flow_gray
+                    else:
+                        flow_pts = None
+                        flow_prev_gray = None
+                elif (
+                    use_flow
+                    and cached_target_face is not None
+                    and flow_pts is not None
+                    and flow_prev_gray is not None
+                ):
+                    # Skip-detection frame — nudge the cached face toward its
+                    # actual position via sparse Lucas-Kanade optical flow
+                    # instead of leaving the swap frozen at the last detection.
+                    try:
+                        new_pts, status, _err = cv2.calcOpticalFlowPyrLK(
+                            flow_prev_gray, flow_gray, flow_pts, None, **lk_params
+                        )
+                    except cv2.error:
+                        new_pts, status = None, None
+
+                    if new_pts is not None and status is not None and int(status.sum()) >= 3:
+                        valid = status.reshape(-1).astype(bool)
+                        old_pts = flow_pts.reshape(-1, 2)
+                        upd_pts = new_pts.reshape(-1, 2).copy()
+                        shift = np.median(upd_pts[valid] - old_pts[valid], axis=0)
+                        # Points optical flow lost individually still move
+                        # with the group's median shift, so kps stays a
+                        # coherent 5-point set for alignment.
+                        upd_pts[~valid] = old_pts[~valid] + shift
+                        cached_target_face.kps = upd_pts.astype(np.float32)
+                        cached_target_face.bbox = (
+                            cached_target_face.bbox
+                            + np.array([shift[0], shift[1], shift[0], shift[1]])
+                        ).astype(cached_target_face.bbox.dtype)
+                        flow_pts = upd_pts.reshape(-1, 1, 2).astype(np.float32)
+                        flow_prev_gray = flow_gray
+                    else:
+                        # Lost track — stop nudging until the next real
+                        # detection resyncs us; avoids drifting off-face.
+                        flow_pts = None
+                        flow_prev_gray = None
 
                 cached_faces = None
                 if cached_many_faces:
@@ -1129,6 +1270,20 @@ class _ProcessingWorker(QThread):
                                 and cached_target_face.bbox is not None
                             ):
                                 swapped_bboxes.append(cached_target_face.bbox.astype(int))
+
+                        # Hair rides on top of the finished swap: inswapper
+                        # rebuilds only the face oval, so without this the
+                        # target's own hair always survives the swap.
+                        if (
+                            modules.globals.hair_transfer
+                            and not modules.globals.many_faces
+                            and cached_target_face is not None
+                            and hair_source_ready
+                        ):
+                            temp_frame = hair_transfer.apply_hair(
+                                temp_frame, cached_target_face
+                            )
+
                         temp_frame = fp.apply_post_processing(temp_frame, swapped_bboxes)
                     else:
                         temp_frame = fp.process_frame(source_image, temp_frame)
@@ -1157,6 +1312,9 @@ class _ProcessingWorker(QThread):
                     temp_frame, f"FPS: {fps:.1f}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2,
                 )
+
+            if modules.globals.show_ai_badge:
+                _draw_ai_badge(temp_frame)
 
             try:
                 self._pq.put_nowait(temp_frame)

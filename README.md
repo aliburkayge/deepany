@@ -354,6 +354,43 @@ python run.py --execution-provider openvino
 -   Use a screen capture tool like OBS to stream.
 -   To change the face, select a new source image.
 
+## Additions in this fork
+
+Three options added on top of upstream, all in the **Options** panel:
+
+**Motion Tracking** *(on by default)* — Live mode only runs full face detection
+every few frames and reuses the last box in between, which lags behind fast head
+movement. This tracks the face through those gap frames with sparse Lucas-Kanade
+optical flow, resyncing on every real detection and falling back to the old
+behaviour whenever tracking is not confident.
+
+**AI Generated Badge** — Overlays an `AI GENERATED` label on the live preview.
+Platforms including TikTok require realistic AI-altered video to be disclosed;
+turn this on before streaming or recording.
+
+**Hair Transfer (beta)** — The inswapper model rebuilds only the face oval, so a
+swap always keeps the *target's* hair. This segments hair out of the source image
+once (MediaPipe `hair_segmenter`) and warps that cutout onto each frame using the
+transform implied by the target's keypoints. Strength is set by the **Hair Blend**
+slider under Refinement.
+
+Setup — install MediaPipe without disturbing the pinned OpenCV, then fetch the model:
+
+```bash
+pip install mediapipe --no-deps
+pip install sounddevice cffi
+curl -L -o models/hair_segmenter.tflite \
+  https://storage.googleapis.com/mediapipe-models/image_segmenter/hair_segmenter/float32/latest/hair_segmenter.tflite
+```
+
+It is a 2D approximation, not a 3D head model, and it shows: the layer fades out
+as the head turns (past roughly 25-30 degrees of yaw it would read as a flat
+sticker), it cannot handle a hand or shoulder passing in front of the head, and
+the source photo's own head pose is baked into the cutout. Use a near-frontal,
+evenly lit source with the hair fully in frame. If you need hair that genuinely
+moves, a physical wig or a 3D avatar pipeline is the honest answer — real-time
+strand-level hair transfer is not a solved problem.
+
 ## Download all models in this huggingface link
 - [**Download models here**](https://huggingface.co/hacksider/deep-live-cam/tree/main)
 

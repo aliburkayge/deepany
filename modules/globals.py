@@ -70,6 +70,23 @@ enable_interpolation: bool = True # Toggle temporal smoothing
 interpolation_weight: float = 0  # Blend weight for current frame (0.0-1.0). Lower=smoother.
 # --- END: Added for Frame Interpolation ---
 
+# --- START: Added for optical-flow face tracking (live mode) ---
+enable_flow_tracking: bool = True  # Track the detected face between full re-detections
+                                    # using sparse optical flow, instead of reusing a
+                                    # stale bbox until the next detection cycle.
+# --- END: Added for optical-flow face tracking ---
+
+# Compliance / disclosure
+show_ai_badge: bool = False  # Overlay an "AI Generated" label on the live preview
+
+# --- START: Experimental hair transfer ---
+# inswapper reconstructs only the face oval, so hair always stays the
+# target's. When enabled, the source image's hair is segmented once and
+# warped onto each frame. 2D approximation — degrades past ~30 deg of yaw.
+hair_transfer: bool = False
+hair_transfer_strength: float = 100.0  # 0-100 opacity of the pasted hair layer
+# --- END: Experimental hair transfer ---
+
 # --- END OF FILE globals.py ---
 
 import threading
